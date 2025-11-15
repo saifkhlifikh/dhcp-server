@@ -48,10 +48,12 @@ class DHCPServer:
         self.dns_servers = config['dns_servers']
         self.lease_time = config['lease_time']
         
-        # Initialize managers
+               # Initialize managers
+        reservations = config.get('reservations', {})
         self.ip_manager = IPManager(
             config['ip_pool_start'],
-            config['ip_pool_end']
+            config['ip_pool_end'],
+            reservations=reservations
         )
         self.lease_manager = LeaseManager(
             lease_file='leases.json',
