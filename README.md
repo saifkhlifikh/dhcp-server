@@ -36,13 +36,13 @@ This project implements a complete DHCP server with enterprise-grade features, f
 
 ## Roadmap
 
-### Phase 1: Core Protocol (Current)
+### Phase 1: Core Protocol 
 - [x] Project structure and configuration
 - [x] DHCP packet parsing (RFC 2131)
 - [x] IP address allocation engine
 - [x] Lease persistence (JSON database)
-- [ ] Complete DHCP message types implementation
-- [ ] Protocol compliance testing
+- [x] Complete DHCP message types implementation
+- [x] Protocol compliance testing
 
 ### Phase 2: Production Features
 
@@ -60,15 +60,6 @@ This project implements a complete DHCP server with enterprise-grade features, f
 - [ ] Docker containerization
 - [ ] Prometheus metrics endpoint
 - [ ] DNS dynamic updates (RFC 2136)
-
-### Phase 4: Quality & DevOps
-- [ ] Unit test suite (pytest)
-- [ ] Integration tests
-- [ ] CI/CD pipeline (GitHub Actions)
-- [ ] API documentation (Swagger/OpenAPI)
-- [ ] Performance benchmarks
-- [ ] Security audit
-
 ---
 
 ## Technology Stack
