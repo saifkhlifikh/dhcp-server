@@ -47,7 +47,6 @@ This project implements a complete DHCP server with enterprise-grade features, f
 ### Phase 2: Production Features
 
 - [x] Static MAC address reservations
-- [ ] Static MAC address reservations
 - [ ] Multiple subnet support
 - [ ] Configuration hot-reload (SIGHUP)
 - [ ] File-based logging with rotation
