@@ -1,13 +1,33 @@
 {
   "server_ip": "192.168.1.1",
-  "subnet_mask": "255.255.255.0",
-  "gateway": "192.168.1.1",
-  "dns_servers": ["8.8.8.8", "8.8.4.4"],
-  "ip_pool_start": "192.168.1.100",
-  "ip_pool_end": "192.168.1.200",
   "lease_time": 86400,
+  "subnets": [
+    {
+      "name": "office-net-1",
+      "network": "192.168.1.0/24",
+      "ip_pool_start": "192.168.1.100",
+      "ip_pool_end": "192.168.1.200",
+      "subnet_mask": "255.255.255.0",
+      "gateway": "192.168.1.1",
+      "dns_servers": ["8.8.8.8", "8.8.4.4"],
+      "reservations": {
+        "aa:bb:cc:dd:ee:ff": "192.168.1.50"
+      }
+    },
+    {
+      "name": "office-net-2",
+      "network": "10.10.0.0/24",
+      "ip_pool_start": "10.10.0.100",
+      "ip_pool_end": "10.10.0.200",
+      "subnet_mask": "255.255.255.0",
+      "gateway": "10.10.0.1",
+      "dns_servers": ["1.1.1.1"],
+      "reservations": {
+        "11:22:33:44:55:66": "10.10.0.50"
+      }
+    }
+  ],
   "reservations": {
-    "aa:bb:cc:dd:ee:ff": "192.168.1.50",
-    "11:22:33:44:55:66": "192.168.1.51"
+    "ff:ee:dd:cc:bb:aa": "192.168.1.60"
   }
 }

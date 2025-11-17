@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-IP Address Pool Manager
-Manages the allocation of IP addresses from a configured pool with MAC reservations.
+IP Address Pool Manager with Multiple Subnet Support.
+
+Responsibilities:
+- Manage multiple subnet pools
+- Honor per-subnet reservations
+- Select subnet by giaddr, requested IP, or default
+- Provide allocation, release, and lookup functions
 """
 
 import ipaddress
@@ -10,195 +15,210 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class IPManager:
-    """Manages IP address allocation from a pool with MAC address reservations."""
-    
-    def __init__(self, pool_start, pool_end, reservations=None):
-        """
-        Initialize IP pool with optional MAC reservations.
-        
-        Args:
-            pool_start (str): Starting IP address (e.g., "192.168.1.100")
-            pool_end (str): Ending IP address (e.g., "192.168.1.200")
-            reservations (dict): MAC to IP mapping for reserved addresses
-        """
-        self.pool_start = ipaddress.IPv4Address(pool_start)
-        self.pool_end = ipaddress.IPv4Address(pool_end)
-        self.reservations = reservations or {}
-        
-        # Normalize MAC addresses in reservations (lowercase, with colons)
-        self.reservations = {
-            self._normalize_mac(mac): ip 
-            for mac, ip in self.reservations.items()
-        }
-        
-        # Generate list of all IPs in pool
+class Subnet:
+    def __init__(self, name, network_cidr, pool_start, pool_end,
+                 subnet_mask=None, gateway=None, dns_servers=None, reservations=None):
+        self.name = name
+        self.network = ipaddress.IPv4Network(network_cidr, strict=False)
+        self.subnet_mask = subnet_mask or str(self.network.netmask)
+        self.gateway = gateway
+        self.dns_servers = dns_servers or []
+        self.reservations = {self._normalize_mac(mac): ip for mac, ip in (reservations or {}).items()}
+        # Build pool set of strings
+        start = ipaddress.IPv4Address(pool_start)
+        end = ipaddress.IPv4Address(pool_end)
         self.pool = set()
-        current = self.pool_start
-        while current <= self.pool_end:
-            self.pool.add(str(current))
-            current += 1
-        
-        # Validate reservations
-        self._validate_reservations()
-        
-        self.allocated = {}  # MAC -> IP mapping for dynamic allocations
-        
-        logger.info(f"IP Pool initialized: {len(self.pool)} addresses available")
-        if self.reservations:
-            logger.info(f"Reservations configured: {len(self.reservations)} MAC addresses")
-            for mac, ip in self.reservations.items():
-                logger.info(f"  Reserved: {mac} -> {ip}")
-    
+        cur = start
+        while cur <= end:
+            self.pool.add(str(cur))
+            cur += 1
+        # allocated: mac -> ip
+        self.allocated = {}
+
     def _normalize_mac(self, mac):
-        """Normalize MAC address to lowercase with colons."""
-        # Remove common separators
         mac = mac.replace('-', ':').replace('.', ':').lower()
-        # Ensure consistent format
         parts = mac.split(':')
         if len(parts) == 6:
             return ':'.join(parts)
         return mac
-    
-    def _validate_reservations(self):
-        """Validate that reservations don't conflict with each other or pool."""
-        # Check for duplicate IPs in reservations
-        reserved_ips = list(self.reservations.values())
-        if len(reserved_ips) != len(set(reserved_ips)):
-            logger.warning("Duplicate IP addresses found in reservations")
-        
-        # Check if reserved IPs are in valid range (warning only)
-        for mac, ip in self.reservations.items():
-            try:
-                ip_addr = ipaddress.IPv4Address(ip)
-                # Reserved IPs can be outside the pool - that's intentional
-                if ip in self.pool:
-                    logger.info(f"Reservation {mac} -> {ip} uses pool IP (will be excluded from dynamic pool)")
-            except ValueError:
-                logger.error(f"Invalid IP address in reservation: {mac} -> {ip}")
-    
-    def allocate_ip(self, mac_address, requested_ip=None):
-        """
-        Allocate an IP address to a MAC address.
-        
-        Priority order:
-        1. Check if MAC has a reservation
-        2. Check if MAC already has an allocation
-        3. Honor requested IP if available
-        4. Allocate first available IP from pool
-        
-        Args:
-            mac_address (str): Client MAC address
-            requested_ip (str, optional): Requested IP address
-            
-        Returns:
-            str: Allocated IP address or None if unavailable
-        """
-        mac_address = self._normalize_mac(mac_address)
-        
-        # Priority 1: Check for MAC reservation
-        if mac_address in self.reservations:
-            reserved_ip = self.reservations[mac_address]
-            self.allocated[mac_address] = reserved_ip
-            logger.info(f"MAC {mac_address} using reserved IP {reserved_ip}")
-            return reserved_ip
-        
-        # Priority 2: Check if MAC already has an IP
-        if mac_address in self.allocated:
-            existing_ip = self.allocated[mac_address]
-            logger.info(f"MAC {mac_address} already has IP {existing_ip}")
-            return existing_ip
-        
-        # Priority 3: Try to honor requested IP
-        if requested_ip and requested_ip in self.pool:
-            # Make sure it's not reserved for someone else
-            if requested_ip not in self.reservations.values():
-                if requested_ip not in self.allocated.values():
-                    self.allocated[mac_address] = requested_ip
-                    logger.info(f"Allocated requested IP {requested_ip} to {mac_address}")
-                    return requested_ip
-                else:
-                    logger.warning(f"Requested IP {requested_ip} already allocated")
-            else:
-                logger.warning(f"Requested IP {requested_ip} is reserved for another MAC")
-        
-        # Priority 4: Allocate first available IP from pool
-        reserved_ips = set(self.reservations.values())
-        for ip in self.pool:
-            # Skip if IP is reserved or already allocated
-            if ip not in reserved_ips and ip not in self.allocated.values():
-                self.allocated[mac_address] = ip
-                logger.info(f"Allocated new IP {ip} to {mac_address}")
-                return ip
-        
-        logger.error(f"No available IPs in pool for {mac_address}")
-        return None
-    
-    def release_ip(self, mac_address):
-        """
-        Release an IP address from a MAC address.
-        
-        Note: Reserved IPs are not actually released, just removed from allocated tracking.
-        
-        Args:
-            mac_address (str): Client MAC address
-            
-        Returns:
-            bool: True if released, False if not found
-        """
-        mac_address = self._normalize_mac(mac_address)
-        
-        if mac_address in self.allocated:
-            released_ip = self.allocated.pop(mac_address)
-            
-            # Check if this was a reserved IP
-            if mac_address in self.reservations:
-                logger.info(f"Released reserved IP {released_ip} from {mac_address} (reservation still active)")
-            else:
-                logger.info(f"Released IP {released_ip} from {mac_address}")
-            return True
-        
-        logger.warning(f"No IP allocated to {mac_address}")
-        return False
-    
-    def get_ip(self, mac_address):
-        """Get allocated IP for a MAC address."""
-        mac_address = self._normalize_mac(mac_address)
-        
-        # Check reservation first
-        if mac_address in self.reservations:
-            return self.reservations[mac_address]
-        
-        return self.allocated.get(mac_address)
-    
-    def is_ip_available(self, ip_address):
-        """Check if IP is in pool and available."""
-        # Not available if it's reserved for someone else
-        if ip_address in self.reservations.values():
+
+    def has_ip(self, ip):
+        try:
+            return ipaddress.IPv4Address(ip) in self.network
+        except Exception:
             return False
-        
-        return ip_address in self.pool and ip_address not in self.allocated.values()
-    
-    def is_reserved(self, mac_address):
-        """Check if a MAC address has a reservation."""
-        mac_address = self._normalize_mac(mac_address)
-        return mac_address in self.reservations
-    
-    def get_reservation(self, mac_address):
-        """Get reserved IP for a MAC address."""
-        mac_address = self._normalize_mac(mac_address)
-        return self.reservations.get(mac_address)
-    
-    def get_stats(self):
-        """Get pool statistics."""
+
+    def is_ip_available(self, ip):
+        if ip in self.reservations.values():
+            return False
+        return ip in self.pool and ip not in self.allocated.values()
+
+    def allocate_for_mac(self, mac, requested_ip=None):
+        mac = self._normalize_mac(mac)
+        # Reservation for this MAC in this subnet?
+        if mac in self.reservations:
+            reserved_ip = self.reservations[mac]
+            self.allocated[mac] = reserved_ip
+            logger.info(f"[{self.name}] MAC {mac} using reserved IP {reserved_ip}")
+            return reserved_ip
+
+        # Already allocated?
+        if mac in self.allocated:
+            return self.allocated[mac]
+
+        # Honor requested IP if available and belongs to this subnet pool
+        if requested_ip and requested_ip in self.pool:
+            if requested_ip not in self.reservations.values() and requested_ip not in self.allocated.values():
+                self.allocated[mac] = requested_ip
+                logger.info(f"[{self.name}] Allocated requested IP {requested_ip} to {mac}")
+                return requested_ip
+            else:
+                logger.debug(f"[{self.name}] Requested IP {requested_ip} not available")
+
+        # Allocate first available
         reserved_ips = set(self.reservations.values())
-        pool_ips_reserved = len([ip for ip in reserved_ips if ip in self.pool])
-        available = len(self.pool) - len(self.allocated) - pool_ips_reserved
-        
+        for ip in sorted(self.pool, key=lambda x: tuple(int(p) for p in x.split('.'))):
+            if ip not in reserved_ips and ip not in self.allocated.values():
+                self.allocated[mac] = ip
+                logger.info(f"[{self.name}] Allocated IP {ip} to {mac}")
+                return ip
+
+        logger.warning(f"[{self.name}] No available IPs")
+        return None
+
+    def release(self, mac):
+        mac = self._normalize_mac(mac)
+        if mac in self.allocated:
+            ip = self.allocated.pop(mac)
+            logger.info(f"[{self.name}] Released IP {ip} for {mac}")
+            return True
+        return False
+
+    def get_ip_for_mac(self, mac):
+        mac = self._normalize_mac(mac)
+        if mac in self.reservations:
+            return self.reservations[mac]
+        return self.allocated.get(mac)
+
+
+class IPManager:
+    """Top-level manager that handles multiple subnets."""
+
+    def __init__(self, subnet_configs=None, global_reservations=None):
+        """
+        subnet_configs: list of dicts with subnet configuration
+        global_reservations: optional dict of mac->ip for backward compatibility
+        """
+        self.subnets = []
+        self.global_reservations = {self._normalize_mac(k): v for k, v in (global_reservations or {}).items()}
+        if subnet_configs:
+            for s in subnet_configs:
+                name = s.get('name') or f"{s.get('ip_pool_start')}-{s.get('ip_pool_end')}"
+                subnet = Subnet(
+                    name=name,
+                    network_cidr=s.get('network') or f"{s.get('ip_pool_start')}/32",
+                    pool_start=s['ip_pool_start'],
+                    pool_end=s['ip_pool_end'],
+                    subnet_mask=s.get('subnet_mask'),
+                    gateway=s.get('gateway'),
+                    dns_servers=s.get('dns_servers', []),
+                    reservations=s.get('reservations', {})
+                )
+                # exclude reserved IPs from dynamic pool if they overlap (info only)
+                self.subnets.append(subnet)
+        logger.info(f"Initialized IPManager with {len(self.subnets)} subnet(s)")
+
+    def _normalize_mac(self, mac):
+        mac = mac.replace('-', ':').replace('.', ':').lower()
+        parts = mac.split(':')
+        if len(parts) == 6:
+            return ':'.join(parts)
+        return mac
+
+    def _find_subnet_by_giaddr(self, giaddr):
+        if not giaddr:
+            return None
+        for subnet in self.subnets:
+            # Check if giaddr is the gateway or inside the subnet network
+            if subnet.gateway and giaddr == subnet.gateway:
+                return subnet
+            if subnet.has_ip(giaddr):
+                return subnet
+        return None
+
+    def _find_subnet_by_requested_ip(self, requested_ip):
+        if not requested_ip:
+            return None
+        for subnet in self.subnets:
+            if subnet.has_ip(requested_ip):
+                return subnet
+        return None
+
+    def allocate_ip(self, mac, requested_ip=None, giaddr=None):
+        """
+        Returns tuple (ip, subnet) where subnet is Subnet object.
+        Allocation strategy:
+          1) global reservation
+          2) subnet selection by giaddr
+          3) subnet selection by requested_ip
+          4) fallback to first subnet with available IP
+        """
+        mac_norm = self._normalize_mac(mac)
+
+        # Global reservation check
+        if mac_norm in self.global_reservations:
+            ip = self.global_reservations[mac_norm]
+            # find subnet that owns this IP
+            subnet = self._find_subnet_by_requested_ip(ip)
+            # If not found, just return ip with None subnet (outside configured subnets)
+            return ip, subnet
+
+        # 1. try giaddr
+        subnet = self._find_subnet_by_giaddr(giaddr)
+        if subnet:
+            ip = subnet.allocate_for_mac(mac, requested_ip=requested_ip)
+            return ip, subnet
+
+        # 2. try requested_ip subnet
+        subnet = self._find_subnet_by_requested_ip(requested_ip)
+        if subnet:
+            ip = subnet.allocate_for_mac(mac, requested_ip=requested_ip)
+            return ip, subnet
+
+        # 3. fallback: first subnet with available IP
+        for subnet in self.subnets:
+            ip = subnet.allocate_for_mac(mac, requested_ip=None)
+            if ip:
+                return ip, subnet
+
+        return None, None
+
+    def get_ip(self, mac):
+        mac_norm = self._normalize_mac(mac)
+        # check global reservations
+        if mac_norm in self.global_reservations:
+            return self.global_reservations[mac_norm]
+        # check per-subnet allocations/reservations
+        for subnet in self.subnets:
+            ip = subnet.get_ip_for_mac(mac)
+            if ip:
+                return ip
+        return None
+
+    def release_ip(self, mac):
+        mac_norm = self._normalize_mac(mac)
+        for subnet in self.subnets:
+            if subnet.release(mac):
+                return True
+        return False
+
+    def get_stats(self):
+        total = sum(len(s.pool) for s in self.subnets)
+        allocated = sum(len(s.allocated) for s in self.subnets)
+        reserved = sum(len(s.reservations) for s in self.subnets) + len(self.global_reservations)
         return {
-            'total': len(self.pool),
-            'allocated': len(self.allocated),
-            'reserved': len(self.reservations),
-            'available': available,
-            'utilization': f"{(len(self.allocated) / len(self.pool) * 100):.1f}%"
+            'total': total,
+            'allocated': allocated,
+            'reserved': reserved,
+            'subnets': [{ 'name': s.name, 'network': str(s.network), 'allocated': len(s.allocated), 'reserved': len(s.reservations) } for s in self.subnets]
         }
