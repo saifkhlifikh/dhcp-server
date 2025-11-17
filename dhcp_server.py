@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Production DHCP Server
-A complete DHCP server implementation with RFC 2131 compliance.
+Production DHCP Server (updated for multiple-subnet support)
 """
 
 import socket
 import json
 import logging
 import struct
-from datetime import datetime
 
 from dhcp_packet import DHCPPacket, DHCPMessageType, DHCPOpCode, DHCPOptions
 from ip_manager import IPManager
@@ -23,123 +21,77 @@ logger = logging.getLogger(__name__)
 
 
 def load_config(config_file='config.json'):
-    """Load DHCP configuration from JSON file."""
-    try:
-        with open(config_file, 'r') as f:
-            config = json.load(f)
-        logger.info(f"Configuration loaded from {config_file}")
-        return config
-    except FileNotFoundError:
-        logger.error(f"Config file {config_file} not found")
-        raise
-    except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON in config file: {e}")
-        raise
+    with open(config_file, 'r') as f:
+        return json.load(f)
 
 
 class DHCPServer:
-    """Complete DHCP Server implementation with RFC 2131 compliance."""
-    
     def __init__(self, config):
         self.config = config
-        self.server_ip = config['server_ip']
-        self.subnet_mask = config['subnet_mask']
-        self.gateway = config['gateway']
-        self.dns_servers = config['dns_servers']
+        self.server_ip = config.get('server_ip')  # can be None if multiple subnets
         self.lease_time = config['lease_time']
-        
-               # Initialize managers
-        reservations = config.get('reservations', {})
-        self.ip_manager = IPManager(
-            config['ip_pool_start'],
-            config['ip_pool_end'],
-            reservations=reservations
-        )
+        # Setup IPManager with subnets or fallback single-pool legacy fields
+        subnets = config.get('subnets')
+        global_res = config.get('reservations', {})
+        if subnets:
+            self.ip_manager = IPManager(subnet_configs=subnets, global_reservations=global_res)
+        else:
+            # Backwards compatibility: synthesize a single-subnet config
+            single_sub = {
+                'name': 'default',
+                'network': f"{config['ip_pool_start']}/32",
+                'ip_pool_start': config['ip_pool_start'],
+                'ip_pool_end': config['ip_pool_end'],
+                'subnet_mask': config.get('subnet_mask'),
+                'gateway': config.get('gateway'),
+                'dns_servers': config.get('dns_servers', []),
+                'reservations': global_res
+            }
+            self.ip_manager = IPManager(subnet_configs=[single_sub], global_reservations={})
+
         self.lease_manager = LeaseManager(
             lease_file='leases.json',
             default_lease_time=self.lease_time
         )
-        
+
         self.server_socket = None
-        
+
     def start(self):
-        """Start the DHCP server."""
-        logger.info("=" * 60)
-        logger.info("Starting DHCP Server...")
-        logger.info("=" * 60)
-        logger.info(f"Server IP: {self.server_ip}")
-        logger.info(f"IP Pool: {self.config['ip_pool_start']} - {self.config['ip_pool_end']}")
-        logger.info(f"Subnet Mask: {self.subnet_mask}")
-        logger.info(f"Gateway: {self.gateway}")
-        logger.info(f"DNS Servers: {', '.join(self.dns_servers)}")
-        logger.info(f"Default Lease Time: {self.lease_time}s ({self.lease_time // 3600}h)")
-        logger.info("=" * 60)
-        
-        # Clean up expired leases
+        logger.info("Starting DHCP Server (multi-subnet enabled)")
         expired = self.lease_manager.cleanup_expired_leases()
         if expired:
             logger.info(f"Cleaned up {expired} expired leases")
-        
-        # Create UDP socket
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        
-        # Bind to DHCP server port (67)
         try:
             self.server_socket.bind(('', 67))
-            logger.info("✓ Server listening on port 67")
-            logger.info("=" * 60)
+            logger.info("Server listening on port 67")
         except PermissionError:
-            logger.error("✗ Permission denied. Run as administrator/root to bind to port 67")
+            logger.error("Permission denied. Run as admin/root to bind to port 67")
             return
-        except Exception as e:
-            logger.error(f"✗ Failed to start server: {e}")
-            return
-        
-        # Main server loop
         self.listen()
-    
+
     def listen(self):
-        """Listen for DHCP requests."""
-        logger.info("Waiting for DHCP requests...\n")
-        
+        logger.info("Waiting for DHCP requests...")
         try:
             while True:
-                data, address = self.server_socket.recvfrom(1024)
-                logger.info(f"📨 Received packet from {address} ({len(data)} bytes)")
-                
+                data, address = self.server_socket.recvfrom(4096)
                 try:
                     self.handle_request(data, address)
                 except Exception as e:
                     logger.error(f"Error handling request: {e}", exc_info=True)
-                
         except KeyboardInterrupt:
-            logger.info("\n" + "=" * 60)
-            logger.info("Shutting down server...")
-            self.print_stats()
+            logger.info("Shutting down")
             self.server_socket.close()
-            logger.info("Server stopped")
-            logger.info("=" * 60)
-    
+
     def handle_request(self, data, address):
-        """Handle incoming DHCP request."""
-        # Parse packet
-        try:
-            packet = DHCPPacket.parse(data)
-        except Exception as e:
-            logger.error(f"Failed to parse packet: {e}")
-            return
-        
-        # Get message type
+        packet = DHCPPacket.parse(data)
         msg_type = packet.get_message_type()
         if msg_type is None:
             logger.warning("Packet has no message type")
             return
-        
-        logger.info(f"📋 {packet}")
-        
-        # Route to appropriate handler
+        logger.info(f"Message type: {DHCPMessageType(msg_type).name} from {packet.get_client_mac()}")
         if msg_type == DHCPMessageType.DISCOVER:
             self.handle_discover(packet, address)
         elif msg_type == DHCPMessageType.REQUEST:
@@ -147,69 +99,45 @@ class DHCPServer:
         elif msg_type == DHCPMessageType.RELEASE:
             self.handle_release(packet, address)
         else:
-            logger.warning(f"Unhandled message type: {DHCPMessageType(msg_type).name}")
-    
+            logger.warning(f"Unhandled message type: {msg_type}")
+
     def handle_discover(self, packet, address):
-        """Handle DHCP DISCOVER message."""
-        logger.info("🔍 Processing DISCOVER...")
-        
         mac = packet.get_client_mac()
         requested_ip = packet.get_requested_ip()
-        
-        # Allocate IP
-        allocated_ip = self.ip_manager.allocate_ip(mac, requested_ip)
-        
+        giaddr = getattr(packet, 'giaddr', None)
+        allocated_ip, subnet = self.ip_manager.allocate_ip(mac, requested_ip=requested_ip, giaddr=giaddr)
         if not allocated_ip:
-            logger.error(f"No available IP for {mac}")
+            logger.error("No available IP")
             return
-        
-        # Build OFFER packet
-        offer = self.build_offer(packet, allocated_ip)
-        
-        # Send OFFER
-        self.send_packet(offer, address)
-        logger.info(f"✓ Sent OFFER: {allocated_ip} to {mac}\n")
-    
+        offer = self.build_offer(packet, allocated_ip, subnet)
+        self.send_packet(offer)
+        logger.info(f"Sent OFFER {allocated_ip} (subnet={subnet.name if subnet else 'unknown'}) to {mac}")
+
     def handle_request_packet(self, packet, address):
-        """Handle DHCP REQUEST message."""
-        logger.info("📝 Processing REQUEST...")
-        
         mac = packet.get_client_mac()
         requested_ip = packet.get_requested_ip() or packet.ciaddr
-        
-        # Check if we can provide this IP
+        giaddr = getattr(packet, 'giaddr', None)
+        # Determine which subnet this request is for (if any)
+        # ip_manager.get_ip checks reservations and allocations
         allocated_ip = self.ip_manager.get_ip(mac)
-        
         if allocated_ip and allocated_ip == requested_ip:
-            # Create lease
+            # determine subnet object for options
+            subnet = self.ip_manager._find_subnet_by_requested_ip(allocated_ip)
             self.lease_manager.create_lease(mac, allocated_ip, self.lease_time)
-            
-            # Build ACK packet
-            ack = self.build_ack(packet, allocated_ip)
-            
-            # Send ACK
-            self.send_packet(ack, address)
-            logger.info(f"✓ Sent ACK: {allocated_ip} to {mac}")
-            logger.info(f"✓ Lease created (expires in {self.lease_time // 3600}h)\n")
+            ack = self.build_ack(packet, allocated_ip, subnet)
+            self.send_packet(ack)
+            logger.info(f"Sent ACK {allocated_ip} to {mac}")
         else:
-            # Send NAK
             logger.warning(f"Cannot provide requested IP {requested_ip} to {mac}")
-            # TODO: Implement NAK packet
-    
+            # TODO: implement NAK
+
     def handle_release(self, packet, address):
-        """Handle DHCP RELEASE message."""
-        logger.info("🔓 Processing RELEASE...")
-        
         mac = packet.get_client_mac()
-        
-        # Release lease and IP
         self.lease_manager.release_lease(mac)
         self.ip_manager.release_ip(mac)
-        
-        logger.info(f"✓ Released IP for {mac}\n")
-    
-    def build_offer(self, request_packet, offered_ip):
-        """Build DHCP OFFER packet."""
+        logger.info(f"Released IP for {mac}")
+
+    def build_offer(self, request_packet, offered_ip, subnet):
         offer = DHCPPacket()
         offer.op = DHCPOpCode.BOOTREPLY
         offer.htype = request_packet.htype
@@ -217,24 +145,23 @@ class DHCPServer:
         offer.xid = request_packet.xid
         offer.flags = request_packet.flags
         offer.yiaddr = offered_ip
-        offer.siaddr = self.server_ip
+        offer.siaddr = (subnet.gateway if subnet and subnet.gateway else self.server_ip)
         offer.chaddr = request_packet.chaddr
-        
-        # Add options
+
         offer.options[DHCPOptions.MESSAGE_TYPE] = bytes([DHCPMessageType.OFFER])
-        offer.options[DHCPOptions.SERVER_ID] = socket.inet_aton(self.server_ip)
+        offer.options[DHCPOptions.SERVER_ID] = socket.inet_aton(offer.siaddr)
         offer.options[DHCPOptions.LEASE_TIME] = struct.pack('!I', self.lease_time)
-        offer.options[DHCPOptions.SUBNET_MASK] = socket.inet_aton(self.subnet_mask)
-        offer.options[DHCPOptions.ROUTER] = socket.inet_aton(self.gateway)
-        
-        # Add DNS servers
-        dns_bytes = b''.join(socket.inet_aton(dns) for dns in self.dns_servers)
-        offer.options[DHCPOptions.DNS_SERVER] = dns_bytes
-        
+        # subnet-specific options
+        if subnet:
+            offer.options[DHCPOptions.SUBNET_MASK] = socket.inet_aton(subnet.subnet_mask)
+            if subnet.gateway:
+                offer.options[DHCPOptions.ROUTER] = socket.inet_aton(subnet.gateway)
+            if subnet.dns_servers:
+                dns_bytes = b''.join(socket.inet_aton(d) for d in subnet.dns_servers)
+                offer.options[DHCPOptions.DNS_SERVER] = dns_bytes
         return offer
-    
-    def build_ack(self, request_packet, assigned_ip):
-        """Build DHCP ACK packet."""
+
+    def build_ack(self, request_packet, assigned_ip, subnet):
         ack = DHCPPacket()
         ack.op = DHCPOpCode.BOOTREPLY
         ack.htype = request_packet.htype
@@ -242,55 +169,22 @@ class DHCPServer:
         ack.xid = request_packet.xid
         ack.flags = request_packet.flags
         ack.yiaddr = assigned_ip
-        ack.siaddr = self.server_ip
+        ack.siaddr = (subnet.gateway if subnet and subnet.gateway else self.server_ip)
         ack.chaddr = request_packet.chaddr
-        
-        # Add options
+
         ack.options[DHCPOptions.MESSAGE_TYPE] = bytes([DHCPMessageType.ACK])
-        ack.options[DHCPOptions.SERVER_ID] = socket.inet_aton(self.server_ip)
+        ack.options[DHCPOptions.SERVER_ID] = socket.inet_aton(ack.siaddr)
         ack.options[DHCPOptions.LEASE_TIME] = struct.pack('!I', self.lease_time)
-        ack.options[DHCPOptions.SUBNET_MASK] = socket.inet_aton(self.subnet_mask)
-        ack.options[DHCPOptions.ROUTER] = socket.inet_aton(self.gateway)
-        
-        # Add DNS servers
-        dns_bytes = b''.join(socket.inet_aton(dns) for dns in self.dns_servers)
-        ack.options[DHCPOptions.DNS_SERVER] = dns_bytes
-        
+        if subnet:
+            ack.options[DHCPOptions.SUBNET_MASK] = socket.inet_aton(subnet.subnet_mask)
+            if subnet.gateway:
+                ack.options[DHCPOptions.ROUTER] = socket.inet_aton(subnet.gateway)
+            if subnet.dns_servers:
+                dns_bytes = b''.join(socket.inet_aton(d) for d in subnet.dns_servers)
+                ack.options[DHCPOptions.DNS_SERVER] = dns_bytes
         return ack
-    
-    def send_packet(self, packet, address):
-        """Send DHCP packet."""
+
+    def send_packet(self, packet):
         data = packet.build()
-        
-        # Broadcast to 255.255.255.255:68 (DHCP client port)
         broadcast_address = ('255.255.255.255', 68)
         self.server_socket.sendto(data, broadcast_address)
-    
-    def print_stats(self):
-        """Print server statistics."""
-        ip_stats = self.ip_manager.get_stats()
-        lease_stats = self.lease_manager.get_stats()
-        
-        logger.info("\n📊 Server Statistics:")
-        logger.info(f"  IP Pool: {ip_stats['allocated']}/{ip_stats['total']} allocated ({ip_stats['utilization']})")
-        logger.info(f"  Leases: {lease_stats['active']} active, {lease_stats['expired']} expired")
-
-
-def main():
-    """Main entry point."""
-    print("\n")
-    print("=" * 60)
-    print("  Production DHCP Server - RFC 2131 Compliant")
-    print("=" * 60)
-    print()
-    
-    # Load configuration
-    config = load_config()
-    
-    # Create and start server
-    server = DHCPServer(config)
-    server.start()
-
-
-if __name__ == "__main__":
-    main()

@@ -1,21 +1,4 @@
-# DHCP Server
 
-A production-ready DHCP server implementation in Python, built from scratch with extensibility and real-world features in mind.
-
-**Status:** Active Development | **RFC 2131 Compliant** | **Educational & Production-Ready**
-
----
-
-## Project Vision
-
-This project implements a complete DHCP server with enterprise-grade features, focusing on:
-
-- **RFC 2131 Compliance** - Full protocol implementation (DISCOVER, OFFER, REQUEST, ACK, RELEASE)
-- **Enterprise Features** - MAC reservations, multiple subnets, relay agent support
-- **Modern DevOps** - Docker containerization, REST API, monitoring integration
-- **Code Quality** - Clean architecture, comprehensive documentation, test coverage
-
----
 
 ## Current Features
 
@@ -45,7 +28,7 @@ This project implements a complete DHCP server with enterprise-grade features, f
 - [ ] Protocol compliance testing
 
 ### Phase 2: Production Features
-- [x] Static MAC address reservations
+- [ ] Static MAC address reservations
 - [ ] Multiple subnet support
 - [ ] Configuration hot-reload (SIGHUP)
 - [ ] File-based logging with rotation
