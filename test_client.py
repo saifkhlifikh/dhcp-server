@@ -1,35 +1,28 @@
 #!/usr/bin/env python3
-"""Simple DHCP client to test the server"""
 import socket
 
 def send_discover():
-    """Send a DHCP DISCOVER packet."""
-    # Create minimal DHCP DISCOVER packet
-    packet = b'\x01'  # BOOTREQUEST
-    packet += b'\x01\x06\x00'  # Hardware type (Ethernet), length, hops
-    packet += b'\x12\x34\x56\x78'  # Transaction ID
-    packet += b'\x00' * 24  # Secs, flags, ciaddr, yiaddr, siaddr, giaddr
-    packet += b'\xaa\xbb\xcc\xdd\xee\xff' + b'\x00' * 10  # Client MAC address
-    packet += b'\x00' * 192  # Server name (64) + boot file (128)
-    packet += b'\x63\x82\x53\x63'  # Magic cookie
-    packet += b'\x35\x01\x01'  # DHCP Message Type = DISCOVER
-    packet += b'\xff'  # End option
+    packet = b'\x01'
+    packet += b'\x01\x06\x00'
+    packet += b'\x12\x34\x56\x78'
+    packet += b'\x00' * 24
+    packet += b'\xaa\xbb\xcc\xdd\xee\xff' + b'\x00' * 10
+    packet += b'\x00' * 192
+    packet += b'\x63\x82\x53\x63'
+    packet += b'\x35\x01\x01'
+    packet += b'\xff'
     
     try:
-        # Create socket
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.settimeout(5)
         
-        # Send DISCOVER
         sock.sendto(packet, ('255.255.255.255', 67))
         print("✓ Sent DHCP DISCOVER packet")
         print("  Client MAC: aa:bb:cc:dd:ee:ff")
         print("  Waiting for OFFER...")
         
-        # Try to receive OFFER
         try:
-            # Bind to client port to receive response
             client_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             client_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             client_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
